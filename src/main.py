@@ -17,17 +17,23 @@ from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.exporter.otlp.proto.http.metric_exporter import OTLPMetricExporter
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
+from opentelemetry.exporter.otlp.proto.http._log_exporter import OTLPLogExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
-# ── OTel setup ────────────────────────────────────────────────────────────────
+# ── OTel setup ──────────────────────────────────────────────────────────────────
 OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+
 resource = Resource.create({
     "service.name": "notification-service",
     "service.version": "1.0.0",
     "service.language": "python",
     "deployment.environment": os.getenv("ENVIRONMENT", "production"),
 })
+
 tracer_provider = TracerProvider(resource=resource)
 tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTLP_ENDPOINT}/v1/traces")))
 trace.set_tracer_provider(tracer_provider)
@@ -37,12 +43,20 @@ meter_provider = MeterProvider(resource=resource, metric_readers=[
 ])
 metrics.set_meter_provider(meter_provider)
 
+logger_provider = LoggerProvider(resource=resource)
+set_logger_provider(logger_provider)
+logger_provider.add_log_record_processor(
+    BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{OTLP_ENDPOINT}/v1/logs"))
+)
+
 LoggingInstrumentor().instrument(set_logging_format=True)
-logging.basicConfig(level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] [traceId=%(otelTraceID)s spanId=%(otelSpanID)s] %(message)s")
+handler = LoggingHandler(level=logging.NOTSET, logger_provider=logger_provider)
+logging.getLogger().addHandler(handler)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] [traceId=%(otelTraceID)s spanId=%(otelSpanID)s] %(message)s")
+
 logger = logging.getLogger("notification-service")
 
-# ── App ───────────────────────────────────────────────────────────────────────
+# ── App ─────────────────────────────────────────────────────────────────────────
 app = FastAPI(title="InsureWatch Notification Service", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 FastAPIInstrumentor.instrument_app(app)
@@ -53,16 +67,16 @@ db = mongo_client.insurewatch
 notifications_col = db.notifications
 
 tracer = trace.get_tracer("notification-service", "1.0.0")
-meter  = metrics.get_meter("notification-service", "1.0.0")
-notifications_sent   = meter.create_counter("notifications.sent.total",   description="Notifications sent")
+meter = metrics.get_meter("notification-service", "1.0.0")
+notifications_sent = meter.create_counter("notifications.sent.total", description="Notifications sent")
 notifications_failed = meter.create_counter("notifications.failed.total", description="Notifications failed")
 
 chaos_state = {
     "service_crash": False,
-    "high_latency":  False,
-    "db_failure":    False,
-    "memory_spike":  False,
-    "cpu_spike":     False,
+    "high_latency": False,
+    "db_failure": False,
+    "memory_spike": False,
+    "cpu_spike": False,
 }
 _memory_hog = []
 
@@ -98,25 +112,23 @@ async def health():
 async def send_notification(req: NotificationRequest):
     with tracer.start_as_current_span("send_notification") as span:
         apply_chaos()
-        span.set_attribute("notification.event",       req.event)
+        span.set_attribute("notification.event", req.event)
         span.set_attribute("notification.customer_id", req.customer_id)
-
         templates = {
             "claim_submitted": f"Your claim {req.claim_id} has been submitted with status: {req.status}",
-            "claim_approved":  f"Great news! Your claim {req.claim_id} has been approved.",
-            "claim_rejected":  f"Your claim {req.claim_id} was not approved. Please contact support.",
-            "policy_renewed":  "Your policy has been successfully renewed.",
+            "claim_approved": f"Great news! Your claim {req.claim_id} has been approved.",
+            "claim_rejected": f"Your claim {req.claim_id} was not approved. Please contact support.",
+            "policy_renewed": "Your policy has been successfully renewed.",
         }
         message = req.message or templates.get(req.event, f"Update on your account: {req.event}")
-
         doc = {
-            "customer_id":  req.customer_id,
-            "event":        req.event,
-            "claim_id":     req.claim_id,
-            "message":      message,
-            "status":       "sent",
-            "channel":      "email",
-            "sent_at":      datetime.utcnow().isoformat(),
+            "customer_id": req.customer_id,
+            "event": req.event,
+            "claim_id": req.claim_id,
+            "message": message,
+            "status": "sent",
+            "channel": "email",
+            "sent_at": datetime.utcnow().isoformat(),
         }
         await notifications_col.insert_one(doc)
         notifications_sent.add(1, {"event": req.event, "channel": "email"})
