@@ -26,6 +26,15 @@ from opentelemetry.instrumentation.logging import LoggingInstrumentor
 
 # ── OTel setup ──────────────────────────────────────────────────────────────────
 OTLP_ENDPOINT = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318")
+OTLP_HEADERS_RAW = os.getenv("OTEL_EXPORTER_OTLP_HEADERS", "")
+
+# Parse headers from comma-separated format: "key1=value1,key2=value2"
+otlp_headers = {}
+if OTLP_HEADERS_RAW:
+    for header in OTLP_HEADERS_RAW.split(','):
+        if '=' in header:
+            key, value = header.split('=', 1)
+            otlp_headers[key.strip()] = value.strip()
 
 resource = Resource.create({
     "service.name": "notification-service",
@@ -35,18 +44,18 @@ resource = Resource.create({
 })
 
 tracer_provider = TracerProvider(resource=resource)
-tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTLP_ENDPOINT}/v1/traces")))
+tracer_provider.add_span_processor(BatchSpanProcessor(OTLPSpanExporter(endpoint=f"{OTLP_ENDPOINT}/v1/traces", headers=otlp_headers)))
 trace.set_tracer_provider(tracer_provider)
 
 meter_provider = MeterProvider(resource=resource, metric_readers=[
-    PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=f"{OTLP_ENDPOINT}/v1/metrics"), export_interval_millis=10000)
+    PeriodicExportingMetricReader(OTLPMetricExporter(endpoint=f"{OTLP_ENDPOINT}/v1/metrics", headers=otlp_headers), export_interval_millis=10000)
 ])
 metrics.set_meter_provider(meter_provider)
 
 logger_provider = LoggerProvider(resource=resource)
 set_logger_provider(logger_provider)
 logger_provider.add_log_record_processor(
-    BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{OTLP_ENDPOINT}/v1/logs"))
+    BatchLogRecordProcessor(OTLPLogExporter(endpoint=f"{OTLP_ENDPOINT}/v1/logs", headers=otlp_headers))
 )
 
 LoggingInstrumentor().instrument(set_logging_format=True)
